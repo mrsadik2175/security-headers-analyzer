@@ -1,0 +1,26 @@
+[build-system]
+
+requires = ["setuptools>= 68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+
+name = "security-headers-analyzer"
+version= "0.1.0"
+
+description ="Analyze HTTP security headers of a URL, score risk, and generate reports."
+readme= "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+
+dependencies = [
+    "requests>=2.31.0",
+    "rich>=13.7.0",
+]
+[project.scripts]
+security-headers-analyzer = "security_headers_analyzer.cli:main"
+
+
+[tool.setuptools.packages.find]
+
+where = ["src"]
