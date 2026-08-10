@@ -45,6 +45,15 @@ def build_parser()-> argparse.ArgumentParser:
         action ="store_true",
         help ="Enable debug logging (do not use in shared/CI logs).",
     )
+
+    parser.add_argument(
+        "--allow-private",
+        action="store_true",
+        help=(
+            "Allow scanning private/internal/loopback addresses. "
+            "For local development only — never use against untrusted input."
+        ),
+    )
     parser.add_argument (
         "--version",
         action = "version",
@@ -60,25 +69,35 @@ def main(argv: list[str] | None = None)-> int:
     setup_logging (verbose=args.verbose)
     logger.info ("Starting scan for %s", args.url)
 
-    scanner =Scanner(target_url=args.url, timeout=args.timeout)
+    scanner = Scanner(
+        target_url =args.url,
+        timeout=args.timeout,
+        allow_private= args.allow_private,
+    )
+
     try:
-
-        scanner.run()
-    except NotImplementedError as exc:
-
-        # Expected at this stage - the scanning pipeline isn't wired
-        # up yet. Fails loudly and clearly instead of pretending to work.
-        logger.error("Feature not available yet: %s", exc)
+        result= scanner.run()
+    except Exception: # noqa: BLE001 - top-level CLI boundary, log & exit cleanly
+        logger.exception ("Unexpected error while scanning %s", args.url)
         return 1
-    except Exception:  # noqa: BLE001 - top-level CLI boundary, log & exit cleanly
-
-        logger.exception("Unexpected error while scanning %s", args.url)
-
+    if result.error:
+        logger.error("Scan failed: %s", result.error)
         return 1
 
+
+    logger.info (
+        "Scan complete. HTTP %s, %d response headers fetched.",
+        result.status_code,
+
+        len(result.raw_headers),
+    )
+
+    if args.verbose:
+        for name, value in sorted (result.raw_headers.items ()):
+            logger.debug("  %s: %s", name, value)
+
+    # Header detection, risk scoring, and report generation land in
+    # Stages 3-6 — for now, raw headers are all we surface.
     return 0
-
-
-
 if __name__ == "__main__":
     sys.exit(main())
