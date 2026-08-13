@@ -17,6 +17,7 @@ import logging
 
 import sys
 from security_headers_analyzer import __version__
+
 from security_headers_analyzer.core.scanner import Scanner
 
 from security_headers_analyzer.utils.logger import setup_logging
@@ -26,7 +27,7 @@ logger=logging.getLogger (__name__)
 
 def build_parser()-> argparse.ArgumentParser:
     parser =argparse.ArgumentParser(
-        prog="security-headers-analyzer",
+        prog= "security-headers-analyzer",
         description= "Analyze the HTTP security headers of a target URL.",
     )
     parser.add_argument (
@@ -36,6 +37,7 @@ def build_parser()-> argparse.ArgumentParser:
     )
     parser.add_argument (
         "--timeout",
+        
         type= float,
         default =10.0,
         help = "Request timeout in seconds (default: 10.0)",
@@ -46,12 +48,13 @@ def build_parser()-> argparse.ArgumentParser:
         help ="Enable debug logging (do not use in shared/CI logs).",
     )
 
-    parser.add_argument(
+    parser.add_argument (
         "--allow-private",
+
         action="store_true",
         help=(
             "Allow scanning private/internal/loopback addresses. "
-            "For local development only — never use against untrusted input."
+            "For local development only - never use against untrusted input."
         ),
     )
     parser.add_argument (
@@ -96,8 +99,25 @@ def main(argv: list[str] | None = None)-> int:
         for name, value in sorted (result.raw_headers.items ()):
             logger.debug("  %s: %s", name, value)
 
-    # Header detection, risk scoring, and report generation land in
-    # Stages 3-6 — for now, raw headers are all we surface.
+    if result.findings:
+
+        present =[f for f in result.findings if f.status.value == "present"]
+        missing =[f for f in result.findings if f.status.value == "missing"]
+        logger.info(
+            "Security headers: %d present, %d missing (of %d checked)",
+            len(present),
+
+            len (missing),
+            len(result.findings),
+        )
+        for finding in result.findings :
+            marker = "✓" if finding.status.value == "present" else "✗"
+            print(f"  {marker} {finding.header_name}: {finding.status.value}")
+
+    # Missing-header analysis, risk scoring, and report generation
+    # land in Stages 4-6 -- for now, present/missing status is all we surface.
+
     return 0
+
 if __name__ == "__main__":
     sys.exit(main())

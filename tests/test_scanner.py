@@ -9,9 +9,10 @@ needing actual internal infrastructure to point at. """
 from unittest.mock import MagicMock, patch
 import pytest
 import requests
+from security_headers_analyzer.core.config import REQUIRED_SECURITY_HEADERS
 from security_headers_analyzer.core.exceptions import InvalidURLError, ScanRequestError
+from security_headers_analyzer.core.models import HeaderStatus
 from security_headers_analyzer.core.scanner import Scanner
-
 
 class TestValidateUrl:
 
@@ -30,7 +31,7 @@ class TestValidateUrl:
     @patch ("security_headers_analyzer.core.scanner.socket.gethostbyname")
     def test_rejects_loopback_address (self, mock_resolve):
 
-        mock_resolve.return_value = "127.0.0.1"
+        mock_resolve.return_value= "127.0.0.1"
 
         scanner = Scanner ("http://localhost")
 
@@ -115,12 +116,76 @@ class TestFetchHeaders :
         with pytest.raises(ScanRequestError, match = "Could not connect"):
             scanner.fetch_headers()
     @patch("security_headers_analyzer.core.scanner.requests.Session.get")
-    def test_too_many_redirects_raises_scan_request_error(self, mock_get):
-        mock_get.side_effect =requests.exceptions.TooManyRedirects()
+    def test_too_many_redirects_raises_scan_request_error (self, mock_get):
+        mock_get.side_effect =requests.exceptions.TooManyRedirects ()
         scanner = Scanner ("https://example.com")
         with pytest.raises (ScanRequestError, match="Too many redirects"):
             scanner.fetch_headers ()
 
+
+class TestDetectHeaders :
+    def test_flags_all_headers_missing_on_empty_response (self):
+        scanner= Scanner("https://example.com")
+        findings= scanner.detect_headers({})
+
+        assert len(findings)==len(REQUIRED_SECURITY_HEADERS)
+        assert all(f.status== HeaderStatus.MISSING for f in findings)
+        assert all (f.value is None for f in findings)
+
+    def test_detects_present_header_with_value (self):
+        scanner= Scanner("https://example.com")
+
+        raw_headers= {"X-Frame-Options": "DENY"}
+        findings= scanner.detect_headers(raw_headers)
+
+
+        xfo= next(f for f in findings if f.header_name == "X-Frame-Options")
+        assert xfo.status == HeaderStatus.PRESENT
+        assert xfo.value == "DENY"
+
+    def test_detection_is_case_insensitive (self):
+
+        # Real servers are inconsistent about header casing -
+        # detection must not miss a header just because of this.
+        
+        scanner= Scanner("https://example.com")
+        raw_headers = {"content-security-policy": "default-src 'self'"}
+        findings =scanner.detect_headers(raw_headers)
+
+        csp = next(f for f in findings if f.header_name == "Content-Security-Policy")
+        assert csp.status== HeaderStatus.PRESENT
+        assert csp.value== "default-src 'self'"
+
+    def test_mixed_present_and_missing (self):
+        scanner= Scanner("https://example.com")
+        raw_headers ={
+
+            "Strict-Transport-Security": "max-age=31536000",
+            "X-Content-Type-Options": "nosniff",
+        }
+
+        findings = scanner.detect_headers (raw_headers)
+
+        present_names={f.header_name for f in findings if f.status == HeaderStatus.PRESENT}
+        missing_names= {f.header_name for f in findings if f.status == HeaderStatus.MISSING}
+
+        assert "Strict-Transport-Security" in present_names
+        assert "X-Content-Type-Options" in present_names
+        assert "Content-Security-Policy" in missing_names
+        assert "X-Frame-Options" in missing_names
+
+    def test_unrelated_headers_are_ignored(self):
+        # Headers outside our required set (e.g. Content-Type) should
+        # not appear in findings at all - we only report on the
+        # headers we actually check for.
+        scanner = Scanner("https://example.com")
+        raw_headers = {"Content-Type":"text/html", "Server":"nginx"}
+
+        findings = scanner.detect_headers(raw_headers)
+
+        reported_names = {f.header_name for f in findings}
+        assert "Content-Type" not in reported_names
+        assert "Server" not in reported_names
 
 
 class TestRunIntegration:
