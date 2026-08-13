@@ -26,10 +26,12 @@ from security_headers_analyzer.core.config import  (
     DEFAULT_USER_AGENT,
 
     MAX_REDIRECTS,
+
+    REQUIRED_SECURITY_HEADERS,
 )
 
 from security_headers_analyzer.core.exceptions import InvalidURLError, ScanRequestError
-from security_headers_analyzer.core.models import ScanResult
+from security_headers_analyzer.core.models import HeaderFinding, HeaderStatus, ScanResult
 
 logger= logging.getLogger (__name__)
 ALLOWED_SCHEMES={"http", "https"}
@@ -50,6 +52,7 @@ class Scanner:
         self.timeout= timeout or DEFAULT_TIMEOUT_SECONDS
         #  SSRF guard toggle: only meant for local/dev testing against
         # e.g http://localhost:8000. Never enable this in a shared
+
         # or production deployment of the tool.
 
         self.allow_private = allow_private
@@ -61,8 +64,8 @@ class Scanner:
         """Validate ``self.target_url`` is a safe, well-formed HTTP(S) URL.
 
         Two layer of validation:
-          1. Structural — must be http(s), must have a hostname.
-          2. Network (SSRF guard) — the hostname must not resolve to a
+          1. Structural - must be http(s), must have a hostname.
+          2. Network (SSRF guard) - the hostname must not resolve to a
              private, loopback, link-local, or otherwise reserved IP,
              unless ``allow_private`` was explicitly set.
 
@@ -77,8 +80,8 @@ class Scanner:
                 f"Only {sorted(ALLOWED_SCHEMES)} are allowed."
             )
 
-        hostname = parsed.hostname
-        if not hostname:
+        hostname =parsed.hostname
+        if not hostname :
             raise InvalidURLError("URL is missing a hostname.")
         if not self.allow_private:
             self._assert_public_host(hostname)
@@ -86,7 +89,7 @@ class Scanner:
         return True
 
     @staticmethod
-    def _assert_public_host(hostname: str) -> None:
+    def _assert_public_host(hostname: str)-> None:
         """Resolve ``hostname`` and reject it if it points at a
         private/internal address. This is the tool's core SSRF defense:
         without it, a user (or an attacker feeding this tool a URL)
@@ -149,23 +152,70 @@ class Scanner:
 
         return dict (response.headers)
 
-    # -- Stubs for later stages -----------------------------------------------
+    # ---- Stubs for later stages -----------------------------------------------
 
-    def detect_headers (self, raw_headers: dict[str, str]) -> list:
+    def detect_headers(self, raw_headers: dict[str, str]) -> list[HeaderFinding]:
         """Compare raw headers against the expected security header set.
 
-        Implemented in Stage 3.
+        Classifies each header in ``REQUIRED_SECURITY_HEADERS`` as
+        PRESENT or MISSING and captures its raw value when present.
 
+        Deliberately narrow in scope: this stage does NOT judge whether
+        a *present* header's value is actually safe (e.g. a weak CSP
+        like ``default-src *``) - that misconfiguration analysis is
+        Stage 4's responsibility. Mixing "is it there" with "is it any
+        good" into one method makes both harder to test in isolation.
+
+        Note on case-insensitivity: HTTP header names are
+        case-insensitive per RFC 7230, but servers are inconsistent
+        about how they capitalize them (``Content-Security-Policy`` vs
+        ``content-security-policy``). We normalize both sides to
+        lowercase for the lookup so detection doesn't silently miss a
+        header just because a server capitalizes it differently.
         """
-        raise NotImplementedError ("Header detection lands in Stage 3.")
+        # Map lowercase header name -> (original-case name, value) so we
+        # can look things up case-insensitively but still report the
+        # server's actual casing back if we ever need it.
+        normalized = {name.lower(): (name, value) for name, value in raw_headers.items()}
 
-    def score_risk(self, findings: list)-> str:
+        findings: list[HeaderFinding]= []
+        for expected_name in REQUIRED_SECURITY_HEADERS:
+            match = normalized.get(expected_name.lower())
+            if match is not None:
+                _, value= match
+                findings.append (
+                    HeaderFinding (
+                        header_name = expected_name,
+                        status = HeaderStatus.PRESENT,
+                        value = value,
+                    )
+                )
+
+            else:
+                findings.append (
+                    HeaderFinding (
+                        header_name = expected_name,
+                        status = HeaderStatus.MISSING,
+                    )
+
+                )
+
+        logger.debug (
+
+            "Detected %d/%d required security headers present",
+            sum(1 for f in findings if f.status == HeaderStatus.PRESENT),
+            len(findings),
+        )
+
+        return findings
+
+    def score_risk(self, findings: list) -> str:
         """Compute an overall risk level from individual findings.
 
         Implemented in Stage 5.
         """
-
         raise NotImplementedError("Risk scoring lands in Stage 5.")
+
 
     # -- Orchestration (partially wired) ----------------------------------
 
@@ -191,18 +241,28 @@ class Scanner:
 
             return result
 
-        result.status_code = self._last_status_code
-        result.raw_headers = raw_headers
+        result.status_code= self._last_status_code
+        result.raw_headers =raw_headers
 
         logger.info (
             "Fetched %d response headers from %s (HTTP %s)",
             len (raw_headers),
             self.target_url,
             result.status_code,
+
+
         )
         
-        # Header detection & risk scoring land in Stages 3-5.
+        result.findings= self.detect_headers(raw_headers)
+        present_count = sum(1 for f in result.findings if f.status == HeaderStatus.PRESENT)
+        logger.info (
 
+            "Header detection complete: %d/%d required security headers present",
+            present_count,
+
+            len(result.findings),
+        )
+
+        # Missing-header analysis (Stage 4) and risk scoring (Stage 5)
+        # land next - overall_risk stays at its default until then.
         return result
-    
-# End for stage 2.
