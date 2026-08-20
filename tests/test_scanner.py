@@ -1,10 +1,9 @@
-""" Tests for Scanner.validate_url() and Scanner.fetch_headers().
+"""Tests for Scanner.validate_url() and Scanner.fetch_headers().
 
 No real network calls are made - socket resolution and HTTP requests
 are mocked so these tests run fast and offline, and so we can
 deterministically test SSRF-protection branches (private IPs) without
-needing actual internal infrastructure to point at. """
-
+needing actual internal infrastructure to point at."""
 
 from unittest.mock import MagicMock, patch
 import pytest
@@ -14,46 +13,45 @@ from security_headers_analyzer.core.exceptions import InvalidURLError, ScanReque
 from security_headers_analyzer.core.models import HeaderStatus
 from security_headers_analyzer.core.scanner import Scanner
 
+
 class TestValidateUrl:
 
-    def test_rejects_non_http_scheme (self):
-        scanner=Scanner("ftp://example.com")
-        with pytest.raises (InvalidURLError, match = "Unsupported URL scheme" ):
+    def test_rejects_non_http_scheme(self):
+        scanner = Scanner("ftp://example.com")
+        with pytest.raises(InvalidURLError, match="Unsupported URL scheme"):
 
             scanner.validate_url()
-    def test_rejects_missing_hostname (self):
-        scanner = Scanner ("https:///path-only")
 
-        with pytest.raises (InvalidURLError, match="missing a hostname"):
-            scanner.validate_url ()
+    def test_rejects_missing_hostname(self):
+        scanner = Scanner("https:///path-only")
 
+        with pytest.raises(InvalidURLError, match="missing a hostname"):
+            scanner.validate_url()
 
-    @patch ("security_headers_analyzer.core.scanner.socket.gethostbyname")
-    def test_rejects_loopback_address (self, mock_resolve):
+    @patch("security_headers_analyzer.core.scanner.socket.gethostbyname")
+    def test_rejects_loopback_address(self, mock_resolve):
 
-        mock_resolve.return_value= "127.0.0.1"
+        mock_resolve.return_value = "127.0.0.1"
 
-        scanner = Scanner ("http://localhost")
+        scanner = Scanner("http://localhost")
 
-        with pytest.raises (InvalidURLError, match="SSRF protection") :
+        with pytest.raises(InvalidURLError, match="SSRF protection"):
 
-            scanner.validate_url ()
+            scanner.validate_url()
 
-    @patch ("security_headers_analyzer.core.scanner.socket.gethostbyname")
-
+    @patch("security_headers_analyzer.core.scanner.socket.gethostbyname")
     def test_rejects_cloud_metadata_ip(self, mock_resolve):
 
         # 169.254.169.254 is the well-known cloud metadata endpoint -
         # a classic SSRF target that must always be blocked by default.
 
-        mock_resolve.return_value= "169.254.169.254"
+        mock_resolve.return_value = "169.254.169.254"
         scanner = Scanner("http://metadata.internal")
 
         with pytest.raises(InvalidURLError, match="SSRF protection"):
             scanner.validate_url()
 
-
-    @patch ("security_headers_analyzer.core.scanner.socket.gethostbyname")
+    @patch("security_headers_analyzer.core.scanner.socket.gethostbyname")
     def test_allows_private_ip_when_explicitly_enabled(self, mock_resolve):
 
         mock_resolve.return_value = "127.0.0.1"
@@ -61,33 +59,32 @@ class TestValidateUrl:
 
         assert scanner.validate_url() is True
 
-    @patch ("security_headers_analyzer.core.scanner.socket.gethostbyname")
-
-    def test_accepts_public_host(self, mock_resolve) :
+    @patch("security_headers_analyzer.core.scanner.socket.gethostbyname")
+    def test_accepts_public_host(self, mock_resolve):
 
         mock_resolve.return_value = "93.184.216.34"
-        scanner = Scanner ("https://example.com")
+        scanner = Scanner("https://example.com")
 
         assert scanner.validate_url() is True
 
     @patch("security_headers_analyzer.core.scanner.socket.gethostbyname")
-
     def test_unresolvable_hostname_raises(self, mock_resolve):
 
         import socket
-        mock_resolve.side_effect=socket.gaierror("Name or service not known")
-        scanner=Scanner ("https://this-domain-does-not-exist.invalid")
-        with pytest.raises (InvalidURLError, match="Could not resolve hostname"):
+
+        mock_resolve.side_effect = socket.gaierror("Name or service not known")
+        scanner = Scanner("https://this-domain-does-not-exist.invalid")
+        with pytest.raises(InvalidURLError, match="Could not resolve hostname"):
             scanner.validate_url()
 
 
-class TestFetchHeaders :
+class TestFetchHeaders:
 
     @patch("security_headers_analyzer.core.scanner.requests.Session.get")
     def test_returns_headers_as_plain_dict(self, mock_get):
 
-        mock_response = MagicMock ()
-        mock_response.headers = {"Content-Type": "text/html","X-Frame-Options": "DENY"}
+        mock_response = MagicMock()
+        mock_response.headers = {"Content-Type": "text/html", "X-Frame-Options": "DENY"}
         mock_response.status_code = 200
 
         mock_get.return_value = mock_response
@@ -95,79 +92,80 @@ class TestFetchHeaders :
         scanner = Scanner("https://example.com")
         headers = scanner.fetch_headers()
 
-        assert headers["X-Frame-Options"]== "DENY"
+        assert headers["X-Frame-Options"] == "DENY"
         assert scanner._last_status_code == 200
-        assert isinstance (headers, dict)
+        assert isinstance(headers, dict)
 
+    @patch("security_headers_analyzer.core.scanner.requests.Session.get")
+    def test_timeout_raises_scan_request_error(self, mock_get):
+        mock_get.side_effect = requests.exceptions.Timeout()
+        scanner = Scanner("https://example.com")
+        with pytest.raises(ScanRequestError, match="timed out"):
+            scanner.fetch_headers()
 
-    @patch ("security_headers_analyzer.core.scanner.requests.Session.get")
-    def test_timeout_raises_scan_request_error (self, mock_get):
-        mock_get.side_effect =requests.exceptions.Timeout()
-        scanner = Scanner ("https://example.com")
-        with pytest.raises (ScanRequestError, match="timed out"):
-            scanner.fetch_headers ()
-
-    @patch ("security_headers_analyzer.core.scanner.requests.Session.get")
-
+    @patch("security_headers_analyzer.core.scanner.requests.Session.get")
     def test_connection_error_raises_scan_request_error(self, mock_get):
 
         mock_get.side_effect = requests.exceptions.ConnectionError()
-        scanner =Scanner("https://example.com")
-        with pytest.raises(ScanRequestError, match = "Could not connect"):
+        scanner = Scanner("https://example.com")
+        with pytest.raises(ScanRequestError, match="Could not connect"):
             scanner.fetch_headers()
+
     @patch("security_headers_analyzer.core.scanner.requests.Session.get")
-    def test_too_many_redirects_raises_scan_request_error (self, mock_get):
-        mock_get.side_effect =requests.exceptions.TooManyRedirects ()
-        scanner = Scanner ("https://example.com")
-        with pytest.raises (ScanRequestError, match="Too many redirects"):
-            scanner.fetch_headers ()
+    def test_too_many_redirects_raises_scan_request_error(self, mock_get):
+        mock_get.side_effect = requests.exceptions.TooManyRedirects()
+        scanner = Scanner("https://example.com")
+        with pytest.raises(ScanRequestError, match="Too many redirects"):
+            scanner.fetch_headers()
 
 
-class TestDetectHeaders :
-    def test_flags_all_headers_missing_on_empty_response (self):
-        scanner= Scanner("https://example.com")
-        findings= scanner.detect_headers({})
+class TestDetectHeaders:
+    def test_flags_all_headers_missing_on_empty_response(self):
+        scanner = Scanner("https://example.com")
+        findings = scanner.detect_headers({})
 
-        assert len(findings)==len(REQUIRED_SECURITY_HEADERS)
-        assert all(f.status== HeaderStatus.MISSING for f in findings)
-        assert all (f.value is None for f in findings)
+        assert len(findings) == len(REQUIRED_SECURITY_HEADERS)
+        assert all(f.status == HeaderStatus.MISSING for f in findings)
+        assert all(f.value is None for f in findings)
 
-    def test_detects_present_header_with_value (self):
-        scanner= Scanner("https://example.com")
+    def test_detects_present_header_with_value(self):
+        scanner = Scanner("https://example.com")
 
-        raw_headers= {"X-Frame-Options": "DENY"}
-        findings= scanner.detect_headers(raw_headers)
+        raw_headers = {"X-Frame-Options": "DENY"}
+        findings = scanner.detect_headers(raw_headers)
 
-
-        xfo= next(f for f in findings if f.header_name == "X-Frame-Options")
+        xfo = next(f for f in findings if f.header_name == "X-Frame-Options")
         assert xfo.status == HeaderStatus.PRESENT
         assert xfo.value == "DENY"
 
-    def test_detection_is_case_insensitive (self):
+    def test_detection_is_case_insensitive(self):
 
         # Real servers are inconsistent about header casing -
         # detection must not miss a header just because of this.
-        
-        scanner= Scanner("https://example.com")
+
+        scanner = Scanner("https://example.com")
         raw_headers = {"content-security-policy": "default-src 'self'"}
-        findings =scanner.detect_headers(raw_headers)
+        findings = scanner.detect_headers(raw_headers)
 
         csp = next(f for f in findings if f.header_name == "Content-Security-Policy")
-        assert csp.status== HeaderStatus.PRESENT
-        assert csp.value== "default-src 'self'"
+        assert csp.status == HeaderStatus.PRESENT
+        assert csp.value == "default-src 'self'"
 
-    def test_mixed_present_and_missing (self):
-        scanner= Scanner("https://example.com")
-        raw_headers ={
-
+    def test_mixed_present_and_missing(self):
+        scanner = Scanner("https://example.com")
+        raw_headers = {
             "Strict-Transport-Security": "max-age=31536000",
             "X-Content-Type-Options": "nosniff",
         }
 
-        findings = scanner.detect_headers (raw_headers)
+        findings = scanner.detect_headers(raw_headers)
 
-        present_names={f.header_name for f in findings if f.status == HeaderStatus.PRESENT}
-        missing_names= {f.header_name for f in findings if f.status == HeaderStatus.MISSING}
+        present_names = {
+            f.header_name for f in findings if f.status == HeaderStatus.PRESENT
+        }
+        missing_names = {
+            f.header_name for f in findings if f.status == HeaderStatus.MISSING
+        }
 
         assert "Strict-Transport-Security" in present_names
         assert "X-Content-Type-Options" in present_names
@@ -179,7 +177,7 @@ class TestDetectHeaders :
         # not appear in findings at all - we only report on the
         # headers we actually check for.
         scanner = Scanner("https://example.com")
-        raw_headers = {"Content-Type":"text/html", "Server":"nginx"}
+        raw_headers = {"Content-Type": "text/html", "Server": "nginx"}
 
         findings = scanner.detect_headers(raw_headers)
 
@@ -189,27 +187,25 @@ class TestDetectHeaders :
 
 
 class TestRunIntegration:
+    """Tests Scanner.run() end-to-end with the network layer mocked."""
 
-    """Tests Scanner.run() end-to-end with the network layer mocked. """
-
-    @patch ("security_headers_analyzer.core.scanner.socket.gethostbyname")
-    @patch ("security_headers_analyzer.core.scanner.requests.Session.get")
+    @patch("security_headers_analyzer.core.scanner.socket.gethostbyname")
+    @patch("security_headers_analyzer.core.scanner.requests.Session.get")
     def test_run_populates_raw_headers_on_success(self, mock_get, mock_resolve):
         mock_resolve.return_value = "93.184.216.34"
 
         mock_response = MagicMock()
-        mock_response.headers = {"X-Content-Type-Options": "nosniff" }
+        mock_response.headers = {"X-Content-Type-Options": "nosniff"}
         mock_response.status_code = 200
 
         mock_get.return_value = mock_response
 
-        scanner =Scanner("https://example.com")
+        scanner = Scanner("https://example.com")
         result = scanner.run()
         assert result.error is None
         assert result.status_code == 200
         assert result.raw_headers["X-Content-Type-Options"] == "nosniff"
 
-        
     def test_run_sets_error_on_invalid_url(self):
         scanner = Scanner("ftp://example.com")
         result = scanner.run()
