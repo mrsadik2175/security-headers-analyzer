@@ -99,19 +99,28 @@ def main(argv: list[str] | None = None) -> int:
 
         present = [f for f in result.findings if f.status.value == "present"]
         missing = [f for f in result.findings if f.status.value == "missing"]
+        misconfigured = [
+            f for f in result.findings if f.status.value == "misconfigured"
+        ]
+
         logger.info(
-            "Security headers: %d present, %d missing (of %d checked)",
+            "Security headers: %d OK, %d misconfigured, %d missing (of %d checked)",
             len(present),
+            len(misconfigured),
             len(missing),
             len(result.findings),
         )
+
+        markers = {"present": "✓", "missing": "✗", "misconfigured": "⚠"}
         for finding in result.findings:
-            marker = "✓" if finding.status.value == "present" else "✗"
+
+            marker = markers[finding.status.value]
             print(f"  {marker} {finding.header_name}: {finding.status.value}")
+            if finding.recommendation:
+                print(f"      -> {finding.recommendation}")
 
-    # Missing-header analysis, risk scoring, and report generation
-    # land in Stages 4-6 -- for now, present/missing status is all we surface.
-
+    # Risk scoring and report generation land in Stages 5-6 — for now,
+    # per-header status and recommendations are all we surface.
     return 0
 
 
