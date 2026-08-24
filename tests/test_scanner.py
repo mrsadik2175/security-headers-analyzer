@@ -185,7 +185,90 @@ class TestDetectHeaders:
         assert "Content-Type" not in reported_names
         assert "Server" not in reported_names
 
+class TestAnalyzeFindings:
+    """Tests Scanner.analyze_findings() — Stage 4's recommendation +
+    misconfiguration-detection logic.
+    """
 
+    def test_missing_header_gets_recommendation(self):
+        scanner = Scanner("https://example.com")
+        findings = scanner.detect_headers({})  # everything missing
+        analyzed = scanner.analyze_findings(findings)
+
+        xfo = next(f for f in analyzed if f.header_name == "X-Frame-Options")
+        assert xfo.status == HeaderStatus.MISSING
+        assert xfo.recommendation is not None
+        assert "DENY" in xfo.recommendation
+
+    def test_healthy_present_header_stays_present(self):
+        scanner = Scanner("https://example.com")
+        findings = scanner.detect_headers({"X-Content-Type-Options": "nosniff"})
+        analyzed = scanner.analyze_findings(findings)
+
+        finding = next(f for f in analyzed if f.header_name == "X-Content-Type-Options")
+        assert finding.status == HeaderStatus.PRESENT
+        assert finding.recommendation is None
+
+    def test_csp_with_unsafe_inline_flagged_misconfigured(self):
+        scanner = Scanner("https://example.com")
+        findings = scanner.detect_headers(
+            {"Content-Security-Policy": "default-src 'self'; script-src 'unsafe-inline'"}
+        )
+        analyzed = scanner.analyze_findings(findings)
+
+        csp = next(f for f in analyzed if f.header_name == "Content-Security-Policy")
+        assert csp.status == HeaderStatus.MISCONFIGURED
+        assert "unsafe-inline" in csp.recommendation
+
+    def test_csp_with_wildcard_flagged_misconfigured(self):
+        scanner = Scanner("https://example.com")
+        findings = scanner.detect_headers({"Content-Security-Policy": "default-src *"})
+        analyzed = scanner.analyze_findings(findings)
+
+        csp = next(f for f in analyzed if f.header_name == "Content-Security-Policy")
+        assert csp.status == HeaderStatus.MISCONFIGURED
+
+    def test_hsts_short_max_age_flagged_misconfigured(self):
+        scanner = Scanner("https://example.com")
+        findings = scanner.detect_headers({"Strict-Transport-Security": "max-age=60"})
+        analyzed = scanner.analyze_findings(findings)
+
+        hsts = next(f for f in analyzed if f.header_name == "Strict-Transport-Security")
+        assert hsts.status == HeaderStatus.MISCONFIGURED
+        assert "too short" in hsts.recommendation
+
+    def test_hsts_long_max_age_stays_present(self):
+        scanner = Scanner("https://example.com")
+        findings = scanner.detect_headers({"Strict-Transport-Security": "max-age=63072000; includeSubDomains"})
+        analyzed = scanner.analyze_findings(findings)
+
+        hsts = next(f for f in analyzed if f.header_name == "Strict-Transport-Security")
+        assert hsts.status == HeaderStatus.PRESENT
+
+    def test_x_frame_options_allowall_flagged_misconfigured(self):
+        scanner = Scanner("https://example.com")
+        findings = scanner.detect_headers({"X-Frame-Options": "ALLOWALL"})
+        analyzed = scanner.analyze_findings(findings)
+
+        xfo = next(f for f in analyzed if f.header_name == "X-Frame-Options")
+        assert xfo.status == HeaderStatus.MISCONFIGURED
+
+    def test_referrer_policy_unsafe_url_flagged_misconfigured(self):
+        scanner = Scanner("https://example.com")
+        findings = scanner.detect_headers({"Referrer-Policy": "unsafe-url"})
+        analyzed = scanner.analyze_findings(findings)
+
+        rp = next(f for f in analyzed if f.header_name == "Referrer-Policy")
+        assert rp.status == HeaderStatus.MISCONFIGURED
+
+    def test_permissions_policy_empty_value_flagged_misconfigured(self):
+        scanner = Scanner("https://example.com")
+        findings = scanner.detect_headers({"Permissions-Policy": ""})
+        analyzed = scanner.analyze_findings(findings)
+
+        pp = next(f for f in analyzed if f.header_name == "Permissions-Policy")
+        assert pp.status == HeaderStatus.MISCONFIGURED
+        assert "empty" in pp.recommendation
 class TestRunIntegration:
     """Tests Scanner.run() end-to-end with the network layer mocked."""
 
