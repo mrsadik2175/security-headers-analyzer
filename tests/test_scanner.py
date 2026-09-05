@@ -10,7 +10,7 @@ import pytest
 import requests
 from security_headers_analyzer.core.config import REQUIRED_SECURITY_HEADERS
 from security_headers_analyzer.core.exceptions import InvalidURLError, ScanRequestError
-from security_headers_analyzer.core.models import HeaderStatus
+from security_headers_analyzer.core.models import HeaderFinding, HeaderStatus, RiskLevel
 from security_headers_analyzer.core.scanner import Scanner
 
 
@@ -185,10 +185,10 @@ class TestDetectHeaders:
         assert "Content-Type" not in reported_names
         assert "Server" not in reported_names
 
+
 class TestAnalyzeFindings:
-    """Tests Scanner.analyze_findings() — Stage 4's recommendation +
-    misconfiguration-detection logic.
-    """
+    """Tests Scanner.analyze_findings() -- Stage 4's recommendation +
+    misconfiguration-detection logic."""
 
     def test_missing_header_gets_recommendation(self):
         scanner = Scanner("https://example.com")
@@ -212,7 +212,9 @@ class TestAnalyzeFindings:
     def test_csp_with_unsafe_inline_flagged_misconfigured(self):
         scanner = Scanner("https://example.com")
         findings = scanner.detect_headers(
-            {"Content-Security-Policy": "default-src 'self'; script-src 'unsafe-inline'"}
+            {
+                "Content-Security-Policy": "default-src 'self'; script-src 'unsafe-inline'"
+            }
         )
         analyzed = scanner.analyze_findings(findings)
 
@@ -239,7 +241,9 @@ class TestAnalyzeFindings:
 
     def test_hsts_long_max_age_stays_present(self):
         scanner = Scanner("https://example.com")
-        findings = scanner.detect_headers({"Strict-Transport-Security": "max-age=63072000; includeSubDomains"})
+        findings = scanner.detect_headers(
+            {"Strict-Transport-Security": "max-age=63072000; includeSubDomains"}
+        )
         analyzed = scanner.analyze_findings(findings)
 
         hsts = next(f for f in analyzed if f.header_name == "Strict-Transport-Security")
@@ -269,6 +273,84 @@ class TestAnalyzeFindings:
         pp = next(f for f in analyzed if f.header_name == "Permissions-Policy")
         assert pp.status == HeaderStatus.MISCONFIGURED
         assert "empty" in pp.recommendation
+
+
+class TestScoreRisk:
+    """Tests Scanner.score_risk() -- Stage 5's severity + overall scoring."""
+
+    def test_all_headers_present_scores_perfect_and_low_risk(self):
+        scanner = Scanner("https://example.com")
+        findings = [
+            HeaderFinding(name, HeaderStatus.PRESENT, value="ok")
+            for name in REQUIRED_SECURITY_HEADERS
+        ]
+        overall_risk, score = scanner.score_risk(findings)
+
+        assert score == 100.0
+        assert overall_risk == RiskLevel.LOW
+        assert all(f.severity == RiskLevel.INFO for f in findings)
+
+    def test_all_headers_missing_scores_zero_and_critical_risk(self):
+        scanner = Scanner("https://example.com")
+        findings = [
+            HeaderFinding(name, HeaderStatus.MISSING)
+            for name in REQUIRED_SECURITY_HEADERS
+        ]
+        overall_risk, score = scanner.score_risk(findings)
+
+        assert score == 0.0
+        assert overall_risk == RiskLevel.CRITICAL
+
+    def test_missing_high_weight_header_gets_high_severity(self):
+        scanner = Scanner("https://example.com")
+        findings = [HeaderFinding("Content-Security-Policy", HeaderStatus.MISSING)]
+        scanner.score_risk(findings)
+
+        assert findings[0].severity == RiskLevel.HIGH
+
+    def test_missing_low_weight_header_gets_low_severity(self):
+        scanner = Scanner("https://example.com")
+        findings = [HeaderFinding("X-Content-Type-Options", HeaderStatus.MISSING)]
+        scanner.score_risk(findings)
+
+        assert findings[0].severity == RiskLevel.LOW
+
+    def test_misconfigured_scores_better_than_missing(self):
+        # A weak-but-present header should never score worse than a
+        # fully absent one which partial protection is still worth something.
+        scanner = Scanner("https://example.com")
+
+        missing_findings = [
+            HeaderFinding("Content-Security-Policy", HeaderStatus.MISSING)
+        ]
+        _, missing_score = scanner.score_risk(missing_findings)
+
+        misconfigured_findings = [
+            HeaderFinding(
+                "Content-Security-Policy", HeaderStatus.MISCONFIGURED, value="weak"
+            )
+        ]
+        _, misconfigured_score = scanner.score_risk(misconfigured_findings)
+
+        assert misconfigured_score > missing_score
+
+    def test_single_missing_low_weight_header_stays_near_top_of_scale(self):
+        # Losing only the lowest-weight header shouldn't tank the score
+        # to CRITICAL/HIGH: it should land just under the perfect-score
+        # LOW threshold, in MEDIUM, not collapse further.
+        scanner = Scanner("https://example.com")
+        findings = [
+            HeaderFinding(name, HeaderStatus.PRESENT, value="ok")
+            for name in REQUIRED_SECURITY_HEADERS
+            if name != "X-Content-Type-Options"
+        ]
+        findings.append(HeaderFinding("X-Content-Type-Options", HeaderStatus.MISSING))
+        overall_risk, score = scanner.score_risk(findings)
+
+        assert score > 85.0
+        assert overall_risk in (RiskLevel.LOW, RiskLevel.MEDIUM)
+
+
 class TestRunIntegration:
     """Tests Scanner.run() end-to-end with the network layer mocked."""
 

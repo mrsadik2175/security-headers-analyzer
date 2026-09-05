@@ -5,42 +5,47 @@ core.scanner
 
 
 The orchestrator class that ties the whole pipeline together:
+
     URL validation -> HTTP request -> header detection -> analysis -> risk scoring -> report
 
 Stage 2 implements ``validate_url()`` and ``fetch_headers()``.
 Stage 3 implements ``detect_headers()``. Stage 4 implements
 ``analyze_findings()``, which turns raw present/missing findings into
 actionable recommendations and flags present-but-weak headers as
-MISCONFIGURED. ``score_risk()`` remains a stub until Stage 5."""
+MISCONFIGURED. ``score_risk()`` remains a stub until Stage 5.
+"""
 
 from __future__ import annotations
 import ipaddress
 import logging
-import re
 import socket
+import re
 from urllib.parse import urlparse
 import requests
 from security_headers_analyzer.core.config import (
     DEFAULT_TIMEOUT_SECONDS,
     DEFAULT_USER_AGENT,
     HEADER_RECOMMENDATIONS,
+    HEADER_RISK_WEIGHT,
     MAX_REDIRECTS,
     MIN_HSTS_MAX_AGE_SECONDS,
+    MISCONFIGURED_PENALTY_FACTOR,
     REQUIRED_SECURITY_HEADERS,
+    RISK_LEVEL_THRESHOLDS,
 )
 
 from security_headers_analyzer.core.exceptions import InvalidURLError, ScanRequestError
 from security_headers_analyzer.core.models import (
     HeaderFinding,
     HeaderStatus,
+    RiskLevel,
     ScanResult,
 )
 
 logger = logging.getLogger(__name__)
 ALLOWED_SCHEMES = {"http", "https"}
 
-
-# ---- Stage 4: weakness checkers --------------------------
+# -------- Stage 4: weakness checkers -----
 # Each function takes a present header's raw value and returns a short
 # human-readable reason string if the value is weak/misconfigured, or
 # None if the value looks fine. Kept as small, independently testable
@@ -55,6 +60,7 @@ def _check_csp_weakness(value: str) -> str | None:
         return "allows 'unsafe-eval', enabling dynamic code execution"
     # A bare wildcard as a source value (e.g. "default-src *") allows
     # loading from ANY origin, which is close to having no CSP at all.
+
     if re.search(r"(?:^|\s)\*(?:\s|;|$)", lowered):
         return "uses a bare wildcard '*' source, allowing any origin"
     return None
@@ -84,7 +90,7 @@ def _check_x_frame_options_weakness(value: str) -> str | None:
 
 def _check_referrer_policy_weakness(value: str) -> str | None:
     # unsafe-url leaks the full URL (including paths/query strings)
-    # cross-origin and over plain HTTP - the most permissive, riskiest
+    # cross-origin and over plain HTTP which the most permissive, riskiest
     # setting this header can have.
     if value.strip().lower() == "unsafe-url":
         return "'unsafe-url' leaks full referrer data cross-origin, including over HTTP"
@@ -93,13 +99,13 @@ def _check_referrer_policy_weakness(value: str) -> str | None:
 
 def _check_permissions_policy_weakness(value: str) -> str | None:
     if value.strip() == "":
-        return "present but empty - restricts nothing"
+        return "present but empty — restricts nothing"
+
     return None
 
 
-# Dispatch table: header name->weakness checker. Headers with no
+# Dispatch table: header name -> weakness checker. Headers with no
 # entry here are treated as "no additional value-quality check yet."
-
 _WEAKNESS_CHECKERS = {
     "Content-Security-Policy": _check_csp_weakness,
     "Strict-Transport-Security": _check_hsts_weakness,
@@ -108,6 +114,47 @@ _WEAKNESS_CHECKERS = {
     "Referrer-Policy": _check_referrer_policy_weakness,
     "Permissions-Policy": _check_permissions_policy_weakness,
 }
+
+
+# --- Stage 5: risk scoring ---------------------------------------------------
+
+
+def _severity_for_finding(header_name: str, status: HeaderStatus) -> RiskLevel:
+    """Map a single finding to a per-header severity level.
+
+    Based on the header's configured risk weight (how impactful it is
+    if broken) and whether it's fully missing (worse) or merely
+    misconfigured (partial protection still exists).
+    """
+    if status == HeaderStatus.PRESENT:
+        return RiskLevel.INFO
+
+    weight = HEADER_RISK_WEIGHT.get(header_name, 0)
+
+    if status == HeaderStatus.MISSING:
+        if weight >= 20:
+            return RiskLevel.HIGH
+        if weight >= 15:
+            return RiskLevel.MEDIUM
+        return RiskLevel.LOW
+
+    # MISCONFIGURED - a weak header is bad, but still one severity
+    # tier better than not having it at all.
+    if weight >= 20:
+        return RiskLevel.MEDIUM
+    return RiskLevel.LOW
+
+
+def _risk_level_from_score(percentage: float) -> RiskLevel:
+    """Map an overall security_score percentage to a RiskLevel using
+    the ordered thresholds in config.RISK_LEVEL_THRESHOLDS.
+    """
+    for threshold, level_value in RISK_LEVEL_THRESHOLDS:
+        if percentage >= threshold:
+            return RiskLevel(level_value)
+    return (
+        RiskLevel.CRITICAL
+    )  # unreachable given a 0.0 floor threshold, but safe default
 
 
 class Scanner:
@@ -332,12 +379,49 @@ class Scanner:
         )
         return findings
 
-    def score_risk(self, findings: list) -> str:
-        """Compute an overall risk level from individual findings.
+    def score_risk(self, findings: list[HeaderFinding]) -> tuple[RiskLevel, float]:
+        """Compute per- finding severity and an overall risk score.
 
-        Implemented in Stage 5.
+        Scoring model: start from the total possible header weight
+        (sum of ``HEADER_RISK_WEIGHT``). Each MISSING header deducts
+        its full weight; each MISCONFIGURED header deducts a fraction
+        of its weight (``MISCONFIGURED_PENALTY_FACTOR``) since a weak
+        header still offers partial protection. The remaining
+        percentage of the total is the ``security_score``, which maps
+        to an overall ``RiskLevel`` via ``RISK_LEVEL_THRESHOLDS``.
+
+        Mutates each finding's ``severity`` in place (same pattern as
+        ``analyze_findings``) and returns ``(overall_risk, security_score)``
+        for the caller to store on the ScanResult.
         """
-        raise NotImplementedError("Risk scoring lands in Stage 5.")
+        total_possible_weight = sum(HEADER_RISK_WEIGHT.values())
+        deduction = 0.0
+
+        for finding in findings:
+            finding.severity = _severity_for_finding(
+                finding.header_name, finding.status
+            )
+
+            weight = HEADER_RISK_WEIGHT.get(finding.header_name, 0)
+            if finding.status == HeaderStatus.MISSING:
+                deduction += weight
+            elif finding.status == HeaderStatus.MISCONFIGURED:
+                deduction += weight * MISCONFIGURED_PENALTY_FACTOR
+
+        remaining_weight = max(0.0, total_possible_weight - deduction)
+        security_score = (
+            round((remaining_weight / total_possible_weight) * 100, 1)
+            if total_possible_weight
+            else 100.0
+        )
+        overall_risk = _risk_level_from_score(security_score)
+
+        logger.debug(
+            "Risk scoring complete: score=%.1f%%, overall_risk=%s",
+            security_score,
+            overall_risk.value,
+        )
+        return overall_risk, security_score
 
     # -- Orchestration (partially wired) ----------------------------------
 
@@ -374,18 +458,15 @@ class Scanner:
 
         result.findings = self.detect_headers(raw_headers)
         result.findings = self.analyze_findings(result.findings)
-
         present_count = sum(
             1 for f in result.findings if f.status == HeaderStatus.PRESENT
         )
-
         misconfigured_count = sum(
             1 for f in result.findings if f.status == HeaderStatus.MISCONFIGURED
         )
         missing_count = sum(
             1 for f in result.findings if f.status == HeaderStatus.MISSING
         )
-
         logger.info(
             "Analysis complete: %d OK, %d misconfigured, %d missing (of %d checked)",
             present_count,
@@ -394,6 +475,12 @@ class Scanner:
             len(result.findings),
         )
 
-        # Risk scoring (Stage 5) and report generation (Stage 6) land
-        # next - overall_risk stays at its default until then.
+        result.overall_risk, result.security_score = self.score_risk(result.findings)
+        logger.info(
+            "Overall risk: %s (security score: %.1f/100)",
+            result.overall_risk.value.upper(),
+            result.security_score,
+        )
+
+        # Report generation(Stage 6)lands next.
         return result
