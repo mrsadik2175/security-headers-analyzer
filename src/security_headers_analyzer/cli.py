@@ -99,19 +99,35 @@ def main(argv: list[str] | None = None) -> int:
 
         present = [f for f in result.findings if f.status.value == "present"]
         missing = [f for f in result.findings if f.status.value == "missing"]
+        misconfigured = [
+            f for f in result.findings if f.status.value == "misconfigured"
+        ]
         logger.info(
-            "Security headers: %d present, %d missing (of %d checked)",
+            "Security headers: %d OK, %d misconfigured, %d missing (of %d checked)",
             len(present),
+            len(misconfigured),
             len(missing),
             len(result.findings),
         )
+
+        print(
+            f"\n  Overall risk: {result.overall_risk.value.upper()}  (score: {result.security_score}/100)\n"
+        )
+        markers = {"present": "✓", "missing": "✗", "misconfigured": "⚠"}
         for finding in result.findings:
-            marker = "✓" if finding.status.value == "present" else "✗"
-            print(f"  {marker} {finding.header_name}: {finding.status.value}")
+            marker = markers[finding.status.value]
+            severity_tag = (
+                f" [{finding.severity.value}]"
+                if finding.severity.value != "info"
+                else ""
+            )
+            print(
+                f"  {marker} {finding.header_name}: {finding.status.value}{severity_tag}"
+            )
+            if finding.recommendation:
+                print(f"      -> {finding.recommendation}")
 
-    # Missing-header analysis, risk scoring, and report generation
-    # land in Stages 4-6 -- for now, present/missing status is all we surface.
-
+    # Report generation lands in Stage 6 -- for now, this CLI summary is the full output.
     return 0
 
 
