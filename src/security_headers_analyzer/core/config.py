@@ -39,3 +39,20 @@ HEADER_RISK_WEIGHT: dict[str, int] = {
     "Referrer-Policy": 10,
     "Permissions-Policy": 10,
 }
+""" ------ Recommended values, used by Stage 4's analysis to generate fixes ------
+ One good example value per header - not the only valid value, but a
+ safe, sensible default we can confidently recommend. """
+
+HEADER_RECOMMENDATIONS: dict[str, str] = {
+    "Content-Security-Policy": "default-src 'self'; script-src 'self'; object-src 'none'",
+    "Strict-Transport-Security": "max-age=63072000; includeSubDomains; preload",
+    "X-Content-Type-Options": "nosniff",
+    "X-Frame-Options": "DENY",
+    "Referrer-Policy": "strict-origin-when-cross-origin",
+    "Permissions-Policy": "geolocation=(), microphone=(), camera=()",
+}
+
+# Minimum acceptable Strict-Transport-Security max-age, in seconds.
+# 15768000 = ~6 months. Below this, HSTS offers only weak protection
+# since the browser "forgets" to enforce HTTPS too quickly.
+MIN_HSTS_MAX_AGE_SECONDS: int = 15_768_000
