@@ -68,9 +68,11 @@ class ScanResult:
     target_url: str
     scanned_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     status_code: int | None = None
-    raw_headers: dict[str, str] = field(default_factory=dict)  # added in the Stage 2
+    raw_headers: dict[str, str] = field(default_factory=dict)  # added in Stage 2
     findings: list[HeaderFinding] = field(default_factory=list)
     overall_risk: RiskLevel = RiskLevel.INFO
+    security_score: float | None = None # 0-100, added in Stage 5
+    duration_seconds: float | None = None # added in Stage 7
     error: str | None = None  # populated if the scan failed (e.g. connection error)
 
     @property
