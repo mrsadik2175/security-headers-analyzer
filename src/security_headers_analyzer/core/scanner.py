@@ -525,5 +525,4 @@ class Scanner:
             result.security_score,
             result.duration_seconds,
         )
-
         return result
