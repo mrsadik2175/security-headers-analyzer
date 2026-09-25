@@ -56,3 +56,34 @@ HEADER_RECOMMENDATIONS: dict[str, str] = {
 # 15768000 = ~6 months. Below this, HSTS offers only weak protection
 # since the browser "forgets" to enforce HTTPS too quickly.
 MIN_HSTS_MAX_AGE_SECONDS: int = 15_768_000
+
+# ---- Risk scoring thresholds (implemented in Stage 5) ------------------
+# A scan's security_score is the % of total possible header weight the
+# target retains after deductions for missing/misconfigured headers.
+# These thresholds map that percentage to an overall RiskLevel.
+# Ordered highest-score-first; the first threshold the score meets/exceeds wins.
+
+RISK_LEVEL_THRESHOLDS: tuple[tuple[float, str], ...] = (
+    (90.0, "low"),
+    (70.0, "medium"),
+    (40.0, "high"),
+    (0.0, "critical"),
+)
+
+# MISCONFIGURED headers deduct this fraction of their full weight
+# (vs. 100% for MISSING) — a weak-but-present header still provides
+# partial protection, so it shouldn't score identically to no header
+# at all.
+
+MISCONFIGURED_PENALTY_FACTOR: float = 0.5
+
+# ----- Retry behavior (implemented in Stage 7) ---------------
+# We're a passive scanner making a single read-only GET — retrying is
+# about tolerating transient network blips, not aggressively hammering
+# the target. Keep this conservative: few retries, only on server-side
+# errors, with backoff between attempts.
+
+RETRY_TOTAL: int = 2
+RETRY_BACKOFF_FACTOR: float = 0.5
+RETRY_STATUS_FORCELIST: tuple[int, ...] = (502, 503, 504)
+

@@ -18,10 +18,13 @@ MISCONFIGURED. ``score_risk()`` remains a stub until Stage 5.
 from __future__ import annotations
 import ipaddress
 import logging
-import socket
 import re
+import socket
+import time
 from urllib.parse import urlparse
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 from security_headers_analyzer.core.config import (
     DEFAULT_TIMEOUT_SECONDS,
     DEFAULT_USER_AGENT,
@@ -31,6 +34,9 @@ from security_headers_analyzer.core.config import (
     MIN_HSTS_MAX_AGE_SECONDS,
     MISCONFIGURED_PENALTY_FACTOR,
     REQUIRED_SECURITY_HEADERS,
+    RETRY_BACKOFF_FACTOR,
+    RETRY_STATUS_FORCELIST,
+    RETRY_TOTAL,
     RISK_LEVEL_THRESHOLDS,
 )
 
@@ -208,44 +214,83 @@ class Scanner:
 
     @staticmethod
     def _assert_public_host(hostname: str) -> None:
-        """Resolve ``hostname`` and reject it if it points at a
-        private/internal address. This is the tool's core SSRF defense:
-        without it, a user (or an attacker feeding this tool a URL)
-        could point the scanner at internal infrastructure like
-        ``http://169.254.169.254`` (cloud metadata endpoints) or
-        ``http://localhost:6379`` (internal services)."""
+        """Resolve ``hostname`` and reject it if ANY resolved address
+        points at a private/internal address. This is the tool's core
+        SSRF defense: without it, a user (or an attacker feeding this
+        tool a URL) could point the scanner at internal infrastructure
+        like ``http://169.254.169.254`` (cloud metadata endpoints) or
+        ``http://localhost:6379`` (internal services).
 
+        Uses ``socket.getaddrinfo`` rather than ``socket.gethostbyname``
+        for two reasons found while writing Stage 7's edge-case tests:
+
+        1. ``gethostbyname`` only returns IPv4 addresses - a hostname
+           that resolves solely to an IPv6 loopback/private address
+           would pass validation entirely undetected.
+        2. ``gethostbyname`` returns only ONE address, even when a
+           hostname has multiple DNS records. A hostname with mixed
+           public/private A records would only have its first-returned
+           IP checked, letting a private address slip through depending
+           on DNS response order.
+
+        ``getaddrinfo`` returns every resolved address (v4 and v6), so
+        we check all of them and reject if even one is private.
+        """
         try:
-            resolved_ip = socket.gethostbyname(hostname)
+            addr_infos = socket.getaddrinfo(hostname, None)
         except socket.gaierror as exc:
             raise InvalidURLError(
                 f"Could not resolve hostname '{hostname}': {exc}"
             ) from exc
 
-        ip_obj = ipaddress.ip_address(resolved_ip)
-
-        if (
-            ip_obj.is_private
-            or ip_obj.is_loopback
-            or ip_obj.is_link_local
-            or ip_obj.is_reserved
-            or ip_obj.is_multicast
-        ):
-            raise InvalidURLError(
-                f"Refusing to scan '{hostname}' ->{resolved_ip}: "
-                "resolves to a private/internal address (SSRF protection). "
-                "Pass allow_private=True only for local development."
-            )
+        for _family, _socktype, _proto, _canonname, sockaddr in addr_infos:
+            # sockaddr is (ip, port) for IPv4 or (ip, port, flowinfo,
+            # scopeid) for IPv6 - the IP is always element 0.
+            resolved_ip = sockaddr[0]
+            ip_obj = ipaddress.ip_address(resolved_ip)
+            if (
+                ip_obj.is_private
+                or ip_obj.is_loopback
+                or ip_obj.is_link_local
+                or ip_obj.is_reserved
+                or ip_obj.is_multicast
+            ):
+                raise InvalidURLError(
+                    f"Refusing to scan '{hostname}' -> {resolved_ip}: "
+                    "resolves to a private/internal address (SSRF protection). "
+                    "Pass allow_private=True only for local development."
+                )
 
     # --- Stage 2: HTTP engine -----------------------------------------------------
     def fetch_headers(self) -> dict[str, str]:
         """Perform the HTTP request and return raw response headers.
-        Uses a dedicated ``requests.Session`` with a capped redirect
-        count and an explicit User-Agent (so the tool identifies
-        itself honestly rather than spoofing a browser)."""
 
+        Uses a dedicated ``requests.Session`` with a capped redirect
+        count, an explicit User-Agent (so the tool identifies itself
+        honestly rather than spoofing a browser), and a conservative
+        retry policy for transient failures.
+
+        Retry policy (Stage 7): retries only on server-side errors
+        (502/503/504) and only for the GET method we actually use -
+        never on 4xx client errors, since retrying "bad request" or
+        "forbidden" wastes time and won't succeed. Kept intentionally
+        small (``RETRY_TOTAL``) with backoff between attempts - this is
+        a passive, read-only scanner and should behave like a polite
+        client, not hammer a struggling target.
+        """
         session = requests.Session()
         session.max_redirects = MAX_REDIRECTS
+
+        retry_strategy = Retry(
+            total=RETRY_TOTAL,
+            backoff_factor=RETRY_BACKOFF_FACTOR,
+            status_forcelist=RETRY_STATUS_FORCELIST,
+            allowed_methods=["GET"],
+        )
+        adapter = HTTPAdapter(max_retries=retry_strategy)
+        session.mount("http://", adapter)
+        session.mount("https://", adapter)
+
         try:
             response = session.get(
                 self.target_url,
@@ -253,12 +298,12 @@ class Scanner:
                 headers={"User-Agent": DEFAULT_USER_AGENT},
                 allow_redirects=True,
             )
+
         except requests.exceptions.Timeout as exc:
             raise ScanRequestError(
                 f"Request to {self.target_url} timed out after {self.timeout}s"
             ) from exc
         except requests.exceptions.TooManyRedirects as exc:
-
             raise ScanRequestError(
                 f"Too many redirects (limit={MAX_REDIRECTS}) for {self.target_url}"
             ) from exc
@@ -267,7 +312,6 @@ class Scanner:
                 f"TLS/SSL error connecting to {self.target_url}: {exc}"
             ) from exc
         except requests.exceptions.ConnectionError as exc:
-
             raise ScanRequestError(
                 f"Could not connect to {self.target_url}: {exc}"
             ) from exc
@@ -275,9 +319,10 @@ class Scanner:
             raise ScanRequestError(
                 f"Request to {self.target_url} failed: {exc}"
             ) from exc
+
         self._last_status_code = response.status_code
         # requests.Response.headers is a case-insensitive dict already;
-        #  cast to a plain dict for a stable, serializable return type.
+        # cast to a plain dict for a stable, serializable return type.
 
         return dict(response.headers)
 
@@ -426,29 +471,24 @@ class Scanner:
     # -- Orchestration (partially wired) ----------------------------------
 
     def run(self) -> ScanResult:
-        """Execute the pipeline as far as it's implemented.
-
-
-        Currently: validate -> fetch. The returned ScanResult carries
-        ``raw_headers`` and ``status_code`` populated, with detection
-        and scoring left for Stages 3-5 to fill in ``findings`` and
-        ``overall_risk``."""
-
+        """Execute the full pipeline: validate -> fetch -> detect ->
+        analyze -> score. Tracks total wall-clock duration for the
+        report (Stage 7).
+        """
+        start_time = time.monotonic()
         result = ScanResult(target_url=self.target_url)
 
         try:
-
             self.validate_url()
             raw_headers = self.fetch_headers()
         except (InvalidURLError, ScanRequestError) as exc:
             result.error = str(exc)
+            result.duration_seconds = round(time.monotonic() - start_time, 3)
             logger.error("Scan failed for %s: %s", self.target_url, exc)
-
             return result
 
         result.status_code = self._last_status_code
         result.raw_headers = raw_headers
-
         logger.info(
             "Fetched %d response headers from %s (HTTP %s)",
             len(raw_headers),
@@ -467,6 +507,7 @@ class Scanner:
         missing_count = sum(
             1 for f in result.findings if f.status == HeaderStatus.MISSING
         )
+
         logger.info(
             "Analysis complete: %d OK, %d misconfigured, %d missing (of %d checked)",
             present_count,
@@ -476,11 +517,12 @@ class Scanner:
         )
 
         result.overall_risk, result.security_score = self.score_risk(result.findings)
+        result.duration_seconds = round(time.monotonic() - start_time, 3)
+
         logger.info(
-            "Overall risk: %s (security score: %.1f/100)",
+            "Overall risk: %s (security score: %.1f/100, took %.3fs)",
             result.overall_risk.value.upper(),
             result.security_score,
+            result.duration_seconds,
         )
-
-        # Report generation(Stage 6)lands next.
         return result
