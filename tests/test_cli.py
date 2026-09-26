@@ -98,5 +98,5 @@ class TestMain:
         output_path = tmp_path / "report.txt"
         exit_code = main(["--url", "https://example.com", "--output", str(output_path)])
         assert exit_code == 0
-        content = output_path.read_text()
+        content = output_path.read_text(encoding="utf-8")
         assert "example.com" in content
