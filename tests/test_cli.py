@@ -73,16 +73,28 @@ class TestMain:
         assert exit_code == 1
 
     def test_json_format_prints_valid_json_to_stdout(self, monkeypatch, capsys):
-        monkeypatch.setattr("security_headers_analyzer.cli.Scanner.run", lambda self: _successful_result())
+        # Regression test for a real bug found during Stage 8 production
+        # packaging verification: logging.basicConfig originally wrote
+        # to sys.stdout, which interleaved log lines with --format json
+        # output and broke JSON parsing for anything piping the output
+        # (e.g. `security-headers-analyzer ... --format json | jq`).
+        monkeypatch.setattr(
+            "security_headers_analyzer.cli.Scanner.run",
+            lambda self: _successful_result()
+        )
+
         main(["--url", "https://example.com", "--format", "json"])
 
         captured = capsys.readouterr()
-        # stdout should contain a JSON blob we can parse - log lines go
-        # to stderr via logging, so stdout should be clean JSON.
+
+        # stdout must contain only the JSON payload.
+        # If log lines were mixed into stdout, json.loads() would fail.
         parsed = json.loads(captured.out)
+
         assert parsed["target_url"] == "https://example.com"
         assert parsed["overall_risk"] == "low"
 
+    
     def test_json_format_writes_to_output_file(self, monkeypatch, tmp_path):
         monkeypatch.setattr("security_headers_analyzer.cli.Scanner.run", lambda self: _successful_result())
         output_path = tmp_path / "report.json"
