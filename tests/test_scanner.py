@@ -375,7 +375,7 @@ class TestScoreRisk:
 
     def test_single_missing_low_weight_header_stays_near_top_of_scale(self):
         # Losing only the lowest-weight header shouldn't tank the score
-        # to CRITICAL/HIGH 0 it should land just under the perfect-score
+        # to CRITICAL/HIGH - it should land just under the perfect-score
         # LOW threshold, in MEDIUM, not collapse further.
         scanner = Scanner("https://example.com")
         findings = [
